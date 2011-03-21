@@ -25,946 +25,27 @@ require 'nokogiri'
 require 'highline/import'
 require 'pathname'
 
+$LOAD_PATH << './lib'
+require 'Reel'
+require 'CPL_SMPTE_429_7_2006'
+require 'KDM_SMPTE_430_1_2006'
+require 'Options'
 
-# FIXME catch missing parameters, false options, typos etc.
-class Optparser
-  def self.parse(args)
-    
-    # defaults
-    options = OpenStruct.new
-    options.mode = 'info'
-    options.span = FALSE
-    options.dcp_title = 'dietrich test'
-    options.issuer = ENV[ 'USER' ] + '@' + `hostname`.chomp
-    options.annotation = "#{ AppName } " + DateTime.now.to_s
-    options.dcp_kind = 'test'
-    options.dcp_kind_choices = [ 'feature', 'trailer', 'test', 'teaser', 'rating', 'advertisement', 'short', 'transitional', 'psa', 'policy' ]
-    options.dcp_user_output_path = nil
-    options.dcp_encrypt = FALSE
-    options.sign = FALSE
-    options.kdm_cpl = NIL
-    options.kdm_target = NIL
-    options.kdm_start = 0 # time window will start now
-    options.kdm_end = 28 # time window will be 4 weeks
-    options.verbosity = 'info'
-    options.verbosity_choices = [ 'quiet', 'info', 'debug' ]
+require 'DC_Signature'
+require 'DC_Signature_KDM'
+require 'PKL_SMPTE_429_8_2007'
+require 'AM_SMPTE_429_9_2007'
+require 'MXF_Metadata'
+require 'DC_Tools'
+require 'Tools'
+require 'X509_Certificate_Chain'
+require 'Logger'
 
-
-    opts = OptionParser.new do |opts|
-      opts.banner = <<BANNER
-#{ AppName } #{ AppVersion } #{ ENV[ 'DIETRICHDIR' ].nil? ? "\nExport DIETRICHDIR to point to desired work directory needed for temporary files, thumbnails, asset depot, DCPs (Default: HOME/#{ AppName }dir)" : "\nDIETRICHDIR is set (#{ ENV[ 'DIETRICHDIR' ] })" } #{ ENV[ 'CINEMACERTSTORE' ].nil? ? "\nExport CINEMACERTSTORE to point to a directory which holds your digital cinema compliant signing key and certificates" : "\nCINEMACERTSTORE is set (#{ ENV[ 'CINEMACERTSTORE' ] })" }
- 
-Usage: #{ File.basename( $0 ) } [-m, --mode <cpl | pkl | kdm | info>] [--span] [--title <DCP title>] [--issuer <DCP issuer/KDM facility code>] [--annotation <DCP/KDM annotation>] [--kind <DCP kind>] [-o, --dcp-out <path>] [--sign] [--encrypt] [--cpl <KDM target cpl file>] [--start <days from now>] [--end <days from now>] [--target <KDM target certificate>] [-v, --verbosity <level>] [--examples] [-h, --help] [ assets ] | [ KDM mode parameters ]
-
-BANNER
-
-      opts.on( '-m', '--mode mode', String, "Mode. Use 'cpl' to create compositions, 'pkl' to package assets, 'kdm' to generate KDMs or 'info' to print asset metadata (Default: info)" ) do |p|
-        options.mode = p.downcase
-      end
-      opts.on( '--span', 'Use this to span 1 asset over all reels in a composition' ) do |p|
-        options.span = TRUE
-      end
-      opts.on( '--title title', String, 'DCP content title' ) do |p|
-        options.dcp_title = p
-      end
-      opts.on( '--issuer issuer', String, 'DCP/KDM issuer. In KDM mode the first 3 letters will be used to signify the KDM creation facility, following KDM naming conventions.' ) do |p|
-        options.issuer = p
-      end
-      opts.on( '--annotation annotation', String, 'DCP/KDM annotation' ) do |p|
-        options.annotation = p
-      end
-      opts.on( '--kind kind', "DCP content kind. Use 'feature', 'trailer, 'test', 'teaser', 'rating', 'advertisement', 'short', 'transitional', 'psa' or 'policy' (Default: test)" ) do |p|
-        if options.dcp_kind_choices.include?( p.downcase )
-          options.dcp_kind = p.downcase
-        end
-      end
-      opts.on( '-o', '--dcp-out path', String, 'DCP location and folder name (Full path. Default: Write to working directory)' ) do |p|
-        options.dcp_user_output_path = p
-      end
-      opts.on( '--sign', 'Sign CPL and PKL (export ENV variable CINEMACERTSTORE to point at a directory that holds your signing certificate and validating certificate chain)' ) do
-        options.sign = TRUE
-      end
-      opts.on( '--encrypt', 'Encrypt trackfiles. Implies signature. Stores content keys in DIETRICHDIR/keys' ) do
-        options.dcp_encrypt = TRUE
-      end
-      opts.on( '--cpl <file>', String, 'KDM mode: Specify CPL file' ) do |p|
-        options.kdm_cpl = p
-      end
-      opts.on( '--start <days>', Integer, 'KDM mode: KDM validity starts <days> from now (Default: Now)' ) do |p|
-        options.kdm_start = p
-      end
-      opts.on( '--end <days>', Integer, 'KDM mode: KDM validity ends <days> from now (Default: 4 weeks from now)' ) do |p|
-        options.kdm_end = p
-      end
-      opts.on( '--target <certificate>', String, 'KDM mode: Path to the recipient device certificate' ) do |p|
-        options.kdm_target = p
-      end
-      opts.on( '-v', '--verbosity level', String, "Use 'quiet', 'info' or 'debug' (Default: info)" ) do |p|
-        if options.verbosity_choices.include?( p )
-          options.verbosity = p
-        else
-          options.verbosity = "info"
-        end
-      end
-
-      opts.on( '--examples', 'Some examples and explanations' ) do
-        app = File.basename( $0 )
-        examples = <<EXAMPLES
-#{ AppName } #{ AppVersion }
-
-Specify options in any order. Order of assets matters.
-
-In order to use signature and KDM generation you need to have 3 related, digital cinema compliant
-certificates in $CINEMACERTSTORE (#{ app } needs some specific names for now -- #{ AppVersion })
-(Use https://github.com/wolfgangw/digital_cinema_tools/blob/master/make-dc-certificate-chain.rb for that)
-
-  Write DCP to custom location
-$ #{ app } --dcp-out /media/usb-disk/slideshow --type dcp image.tiff audio.wav --title "First composition"
-
-  Encrypt DCP trackfiles and store content keys in $DIETRICHDIR/keys (--encrypt implies signing):
-  Go check the final CPL for key IDs and compare to stored content keys
-  Using asdcplib you can decrypt and extract essence with
-        asdcp-test -x decrypted_ -k '<content key -- 16 bytes in hex>' <encrypted MXF>
-$ #{ app } -t dcp --encrypt --title "Encryption test" -o ENCRYPTION_TST_F_2K_20101231_WOE_OV -x cut,0.04167 demo_sequence/
-
-  Generate KDM for some content, targeting our XDC Solo G3 server certificate with a time window from now to 10 days from now:
-$ #{ app } -v debug --kdm --cpl ENCRYPTION_TST_F_2K_20101231_WOE_OV/cpl_<UUID>_.xml --start 0 --end 10 --target 200100400530_000487.pem
-
-EXAMPLES
-        puts examples
-        exit
-      end
-      opts.on_tail( '-h', '--help', 'Display this screen' ) do
-        puts opts
-        exit
-      end
-
-    end
-    opts.parse!(args)
-    options
-  end # parse
-end # class
-
-
-# reconstruct original commandline for readme file
-commandline = File.basename( $0 )
-ARGV.each do |arg|
-  if arg =~ /.+\s.+/
-    commandline += ' ' + '"' + arg + '"'
-  else
-    commandline += ' ' + arg
-  end
-end
+commandline = reconstruct_commandline( ARGV )
 # destructive parse
-@options = Optparser.parse(ARGV)
-
-
-# FIXME got cornered by a (weak) prototyping decision concerning keyfile format.
-# FIXME thus keys (format '<key id>:<key type>:<key data>') are passed in here 
-# FIXME when all we need for KeyIdList is type and id.
-# FIXME will merge with cipher_data_payloads to pass in a list of all those.
-class KDM_SMPTE_430_1_2006 # see SMPTE 430-3-2008 ETM and SMPTE 430-1-2006 KDM
-  def initialize( message_uuid, message_annotation, issue_date, signing_cert, recipient_cert, cpl_uuid, cpl_content_title_text, cpl_content_authenticator, kdm_not_valid_before, kdm_not_valid_after, device_list_identifier, device_list_description, device_cert_thumbprint, keys, cipher_data_payloads )
-    # FIXME Nokogiri does not support :standalone
-    @builder = Nokogiri::XML::Builder.new( :encoding => 'UTF-8' ) do |xml|
-      xml.DCinemaSecurityMessage_( 'xmlns' => 'http://www.smpte-ra.org/schemas/430-3/2006/ETM', 'xmlns:ds' => 'http://www.w3.org/2000/09/xmldsig#', 'xmlns:enc' => 'http://www.w3.org/2001/04/xmlenc#' ) {
-        xml<< "<!-- #{ AppName } #{ AppVersion } smpte kdm -->"
-        xml.AuthenticatedPublic_( 'Id' => 'ID_AuthenticatedPublic' ) {
-          xml.MessageId_ "urn:uuid:#{ message_uuid }"
-          # see SMPTE 430-1-Am1-2009 (D-Cinema Operations - Key delivery message - Amendment 1)
-          # for an informative note regarding MessageType:
-          #   Informative Note: The MessageType value "http://www.smpte-ra.org/430-1/2006/KDM#kdm-key-type" 
-          #   is legal and correct, but, in the event a future revision of the KDM specification requires 
-          #   a revision to the MessageType value, the MessageType value should follow the pattern 
-          #   http://www.smpte-ra.org/430-1/2006/KDM and match the target namespace of the schema.
-          # The amended MessageType value triggers errors on some cinema servers, hence roll back to
-          xml.MessageType_ 'http://www.smpte-ra.org/430-1/2006/KDM#kdm-key-type'
-          xml.AnnotationText_ message_annotation
-          xml.IssueDate_ issue_date
-          xml.Signer_ {
-            xml[ 'ds' ].X509IssuerName_ transform_cert_name( signing_cert.issuer )
-            xml[ 'ds' ].X509SerialNumber_ signing_cert.serial.to_s
-          } # Signer
-          xml.RequiredExtensions_ {
-            xml.KDMRequiredExtensions_( :xmlns => 'http://www.smpte-ra.org/schemas/430-1/2006/KDM' ) {
-              xml.Recipient_ {
-                xml.X509IssuerSerial_ {
-                  xml[ 'ds' ].X509IssuerName_ transform_cert_name( recipient_cert.issuer )
-                  xml[ 'ds' ].X509SerialNumber recipient_cert.serial.to_s
-                } # X509IssuerSerial
-                xml.X509SubjectName_ transform_cert_name( recipient_cert.subject )
-              } # Recipient
-              xml.CompositionPlaylistId_ "urn:uuid:#{ cpl_uuid }"
-              xml.ContentTitleText_ cpl_content_title_text
-              xml.ContentAuthenticator_ cpl_content_authenticator
-              xml.ContentKeysNotValidBefore_ kdm_not_valid_before
-              xml.ContentKeysNotValidAfter_ kdm_not_valid_after
-              xml.AuthorizedDeviceInfo_ {
-                # FIXME ad-hoc DeviceListIdentifier
-                xml.DeviceListIdentifier_ "urn:uuid:#{ device_list_identifier }"
-                xml.DeviceListDescription_ device_list_description
-                xml.DeviceList_ {
-                  xml.CertificateThumbprint_ device_cert_thumbprint
-                } # DeviceList
-              } # AuthorizedDeviceInfo
-              xml.KeyIdList_ {
-                keys.each do |key|
-                  # FIXME
-                  key_id = key.split( ':' ).first
-                  key_type = key.split( ':' )[ 1 ]
-                  xml.TypedKeyId_ {
-                    # Nokogiri workaround for tags with attributes and content
-                    xml.KeyType_( key_type, :scope => 'http://www.smpte-ra.org/430-1/2006/KDM#kdm-key-type' )
-                    xml.KeyId_ "urn:uuid:#{ key_id }"
-                  } # TypedKeyId
-                end
-              } # KeyIdList
-              xml.ForensicMarkFlagList_ {
-                # example
-                xml.ForensicMarkFlag_ 'http://www.smpte-ra.org/430-1/2006/KDM#mrkflg-picture-disable'
-                xml.ForensicMarkFlag_ 'http://www.smpte-ra.org/430-1/2006/KDM#mrkflg-audio-disable'
-              } # ForensicMarkFlagList
-            } # KDMRequiredExtensions
-          } # RequiredExtensions
-          xml.NonCriticalExtensions_
-        } # AuthenticatedPublic
-        xml.AuthenticatedPrivate_( 'Id' => 'ID_AuthenticatedPrivate' ) {
-          cipher_data_payloads.each do |b64|
-            xml[ 'enc' ].EncryptedKey_( 'xmlns:enc' => 'http://www.w3.org/2001/04/xmlenc#' ) {
-              xml[ 'enc' ].EncryptionMethod_( 'Algorithm' => 'http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p' ) {
-                xml[ 'ds' ].DigestMethod_( 'xmlns:ds' => 'http://www.w3.org/2000/09/xmldsig#', 'Algorithm' => 'http://www.w3.org/2000/09/xmldsig#sha1' )
-              } # EncryptionMethod
-              xml[ 'enc' ].CipherData_ {
-                xml[ 'enc' ].CipherValue_ b64
-              } # CipherData
-            } # EncryptedKey
-          end
-        } # AuthenticatedPrivate
-      } # DCinemaSecurityMessage
-    end # @builder
-  end # initialize
-  
-  def xml
-    @builder.to_xml( :indent => 2 )
-  end
-end # KDM_SMPTE_430_1_2006
-
-
-class DCSignatureKDM
-  def initialize( xml_to_sign, signer_key_file, ca_cert_file, intermediate_cert_file, certificate_chain )
-    doc = Nokogiri::XML( xml_to_sign ) { |x| x.noblanks }
-    @builder_signature_template = Nokogiri::XML::Builder.with( doc.at( doc.root.node_name ) ) do |xml|
-      xml[ 'ds' ].Signature_( 'xmlns:ds' => 'http://www.w3.org/2000/09/xmldsig#' ) {
-        xml.SignedInfo_ {
-          xml.CanonicalizationMethod_( 'Algorithm' => 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments' )
-          xml.SignatureMethod_( 'Algorithm' => 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256' )
-          xml.Reference_( 'URI' => '#ID_AuthenticatedPublic' ) {
-            xml.DigestMethod_( 'Algorithm' => 'http://www.w3.org/2001/04/xmlenc#sha256' )
-            xml.DigestValue_
-          } # Reference
-          xml.Reference_( 'URI' => '#ID_AuthenticatedPrivate' ) {
-            xml.DigestMethod_( 'Algorithm' => 'http://www.w3.org/2001/04/xmlenc#sha256' )
-            xml.DigestValue_
-          } # Reference
-        } # SignedInfo
-        xml.SignatureValue_
-        xml.KeyInfo_ {
-          certificate_chain.each do |cert|
-            xml.X509Data_ {
-              xml.X509IssuerSerial_ {
-                xml.X509IssuerName_ transform_cert_name( cert.issuer )
-                xml.X509SerialNumber_ cert.serial.to_s
-              } # X509IssuerSerial
-              xml.X509Certificate stripped( cert.to_pem )
-            } # X509Data
-          end # certs
-        } # KeyInfo
-      } # Signature
-    end # @builder_signature_template
-    
-    pre_signed_xml = @builder_signature_template.to_xml( :indent => 2 )
-    tmp = Tempfile.new( 'cinemaslides-' )
-    tmpfile = File.open( tmp.path, 'w' ) { |f| f.write pre_signed_xml; f.close }
-    #File.copy( tmp.path, 'presigned.xml' )
-
-    # FIXME hardcoded certificate chain size
-    @signed_xml = `xmlsec1 --sign --id-attr:Id http://www.smpte-ra.org/schemas/430-3/2006/ETM:AuthenticatedPublic --id-attr:Id http://www.smpte-ra.org/schemas/430-3/2006/ETM:AuthenticatedPrivate --privkey-pem #{ signer_key_file } --trusted-pem #{ ca_cert_file } --trusted-pem #{ intermediate_cert_file } #{ tmp.path }`
-    #
-
-  end # initialize
-  def xml
-    @signed_xml
-  end
-end # DCSignatureKDM
-
-
-# 
-class DCSignature
-  def initialize( xml_to_sign, signer_key_file, ca_cert_file, intermediate_cert_file, certificate_chain )
-    signing_cert = certificate_chain.first
-    doc = Nokogiri::XML( xml_to_sign ) { |x| x.noblanks } # Thanks, Aaron Patterson
-    @builder_signature_template = Nokogiri::XML::Builder.with( doc.at( doc.root.node_name ) ) do |xml|
-      xml.Signer_ {
-        xml[ 'dsig' ].X509Data_ {
-          xml.X509IssuerSerial_ {
-            xml.X509IssuerName_ transform_cert_name( signing_cert.issuer )
-            xml.X509SerialNumber_ signing_cert.serial.to_s
-          } # X509IssuerSerial
-          xml.X509SubjectName_ transform_cert_name( signing_cert.subject ) # informational
-        } # X509Data
-      } # Signer
-      # signature template:
-      xml[ 'dsig' ].Signature_ {
-        xml.SignedInfo_ {
-          xml.CanonicalizationMethod_( 'Algorithm' => 'http://www.w3.org/TR/2001/REC-xml-c14n-20010315' )
-          xml.SignatureMethod_( 'Algorithm' => 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256' )
-          xml.Reference_( 'URI' => "" ) {
-            xml.Transforms_ {
-              xml.Transform_( 'Algorithm' => 'http://www.w3.org/2000/09/xmldsig#enveloped-signature' )
-            } # Transforms
-            xml.DigestMethod_( 'Algorithm' => 'http://www.w3.org/2000/09/xmldsig#sha1' )
-            xml.DigestValue_
-          } # Reference
-        } # SignedInfo
-        xml.SignatureValue_
-        xml[ 'dsig' ].KeyInfo_ {
-          certificate_chain.each do |cert|
-            xml.X509Data_ {
-              xml.X509IssuerSerial_ {
-                xml.X509IssuerName_ transform_cert_name( cert.issuer )
-                xml.X509SerialNumber_ cert.serial.to_s
-              } # X509IssuerSerial
-              xml.X509Certificate stripped( cert.to_pem )
-            } # X509Data
-          end # certs
-        } # KeyInfo
-      } # Signature
-    end # @builder_signature_template
-
-    pre_signed_xml = @builder_signature_template.to_xml( :indent => 2 )
-    tmp = Tempfile.new( 'cinemaslides-' )
-    tmpfile = File.open( tmp.path, 'w' ) { |f| f.write pre_signed_xml; f.close }
-
-    # FIXME hardcoded certificate chain size
-    @signed_xml = `xmlsec1 --sign --privkey-pem #{ signer_key_file } --trusted-pem #{ ca_cert_file } --trusted-pem #{ intermediate_cert_file } #{ tmp.path }`
-    #
-    
-  end # initialize
-  
-  def xml
-    @signed_xml
-  end
-end # DCSignature
-
-
-class CPL_SMPTE_429_7_2006
-  def initialize( cpl_uuid, encrypt, image_mxfs, audio_mxfs, annotation, issue_date, issuer, creator, content_title, content_kind, content_version_id, content_version_label, rating_list )
-    @builder = Nokogiri::XML::Builder.new( :encoding => 'UTF-8' ) do |xml|
-      xml.CompositionPlaylist_( :xmlns => 'http://www.smpte-ra.org/schemas/429-7/2006/CPL', 'xmlns:dsig' => 'http://www.w3.org/2000/09/xmldsig#' ) {
-        xml<< "<!-- #{ AppName } #{ AppVersion } smpte cpl -->"
-        xml.Id_ "urn:uuid:#{ cpl_uuid }"
-        xml.AnnotationText_ annotation
-        xml.IssueDate_ issue_date
-        xml.Issuer_ issuer
-        xml.Creator_ creator
-        xml.ContentTitleText_ content_title
-        xml.ContentKind_ content_kind
-        xml.ContentVersion_ {
-          xml.Id_ "urn:uri:#{ content_version_id }"
-          xml.LabelText_ content_version_label
-        } # ContentVersion
-        xml.RatingList_ "#{ rating_list.nil? ? '' : rating_list }"
-        xml.ReelList_ {
-          image_mxfs.each_with_index do |image_mxf, index| # assume image_mxfs.size == audio_mxfs.size
-            image_meta = MXF_Metadata.new( image_mxf ).hash
-            audio_meta = MXF_Metadata.new( audio_mxfs[ index ] ).hash unless audio_mxfs.nil?
-            xml.Reel_ {
-              xml.Id_ "urn:uuid:#{ `kmuuidgen -n` }" # FIXME
-              xml.AssetList_ {
-                if image_meta.has_key?( 'File essence type is JPEG 2000 stereoscopic pictures.' )
-                  xml.MainStereoscopicPicture_( 'xmlns:msp-cpl' => 'http://www.smpte-ra.org/schemas/429-10/2008/Main-Stereo-Picture-CPL' ) {
-                    xml.Id_ "urn:uuid:#{ image_meta[ 'AssetUUID' ] }"
-                    xml.EditRate_ image_meta[ 'EditRate' ].to_s.gsub( '/', ' ' )
-                    xml.IntrinsicDuration_ image_meta[ 'ContainerDuration' ]
-                    xml.EntryPoint_ 0 # FIXME
-                    xml.Duration_ image_meta[ 'ContainerDuration' ] # FIXME
-                    if encrypt == TRUE
-                      xml.KeyId_ "urn:uuid:#{ image_meta[ 'CryptographicKeyID' ] }"
-                      xml.Hash_ asdcp_digest( image_mxf )
-                    end
-                    xml.FrameRate_ image_meta[ 'SampleRate' ].to_s.gsub( '/', ' ' ) # FIXME SampleRate?
-                    xml.ScreenAspectRatio_ image_meta[ 'AspectRatio' ].to_s.gsub( '/', ' ' )
-                  } # MainStereoscopicPicture
-                else
-                  xml.MainPicture_ {
-                    xml.Id_ "urn:uuid:#{ image_meta[ 'AssetUUID' ] }"
-                    xml.EditRate_ image_meta[ 'EditRate' ].to_s.gsub( '/', ' ' )
-                    xml.IntrinsicDuration_ image_meta[ 'ContainerDuration' ]
-                    xml.EntryPoint_ 0 # FIXME
-                    xml.Duration_ image_meta[ 'ContainerDuration' ] # FIXME
-                    if encrypt == TRUE
-                      xml.KeyId_ "urn:uuid:#{ image_meta[ 'CryptographicKeyID' ] }"
-                      xml.Hash_ asdcp_digest( image_mxf )
-                    end
-                    xml.FrameRate_ image_meta[ 'SampleRate' ].to_s.gsub( '/', ' ' ) # FIXME SampleRate?
-                    xml.ScreenAspectRatio_ image_meta[ 'AspectRatio' ].to_s.gsub( '/', ' ' )
-                  } # MainPicture
-                end
-                unless audio_mxfs.nil?
-                  xml.MainSound_ {
-                    xml.Id_ "urn:uuid:#{ audio_meta[ 'AssetUUID' ] }"
-                    xml.EditRate_ audio_meta[ 'EditRate' ].to_s.gsub( '/', ' ' )
-                    xml.IntrinsicDuration_ audio_meta[ 'ContainerDuration' ]
-                    xml.EntryPoint_ 0 # FIXME
-                    xml.Duration_ audio_meta[ 'ContainerDuration' ].to_s.gsub( '/', ' ' ) # FIXME
-                    if encrypt == TRUE
-                      xml.KeyId_ "urn:uuid:#{ audio_meta[ 'CryptographicKeyID' ] }"
-                      xml.Hash_ asdcp_digest( audio_mxfs[ index ] )
-                    end
-                  } # MainSound
-                end
-              } # AssetList
-            } # Reel
-          end # image_mxfs.each
-        } # ReelList
-      } # CompositionPlaylist
-    end # @builder
-  end # initialize
-    
-  def xml
-    return @builder.to_xml( :indent => 2 )
-  end
-  
-  def check_reels
-    nodes = Nokogiri::XML::Document.parse( @builder.to_xml )
-    reels = nodes.xpath( '//xmlns:CompositionPlaylist/xmlns:ReelList/xmlns:Reel' )
-    puts "Number of reels: #{ reels.size }"
-    reels.each_with_index do |reel, index|
-      puts "Reel # #{ index + 1 }:"
-      puts "Image MXF Id => #{ reel.search( 'AssetList/MainPicture/Id' ).text }"
-      puts "Sound MXF Id => #{ reel.search( 'AssetList/MainSound/Id' ).text }"
-    end
-  end # check_reels
-end # CPL_SMPTE_429_7_2006
-
-
-class PKL_SMPTE_429_8_2007
-  def initialize( pkl_uuid, annotation, issue_date, issuer, creator, assets )
-    @builder = Nokogiri::XML::Builder.new( :encoding => 'UTF-8' ) do |xml|
-      xml.PackingList_( :xmlns => 'http://www.smpte-ra.org/schemas/429-8/2007/PKL', 'xmlns:dsig' => 'http://www.w3.org/2000/09/xmldsig#' ) {
-        xml<< "<!-- #{ AppName } #{ AppVersion } smpte pkl -->"
-        xml.Id_ "urn:uuid:#{ pkl_uuid }"
-        xml.AnnotationText_ annotation
-        xml.IssueDate_ issue_date
-        xml.Issuer_ issuer
-        xml.Creator_ creator
-        xml.AssetList_ {
-          assets.each do |asset|
-            fh = File.open( asset, 'r' )
-            fh_line = fh.read( 19 )
-            fh.close
-            if fh_line =~ /^<\?xml version="1.0"/
-              mimetype = 'text/xml'
-              asset_uuid = Nokogiri::XML( File.open( asset ) ).xpath( "//xmlns:CompositionPlaylist/xmlns:Id" ).text.split( 'urn:uuid:' ).last
-            else
-              mimetype = 'application/mxf'
-              metadata = MXF_Metadata.new( asset ).hash
-              asset_uuid = metadata[ 'AssetUUID' ]
-            end
-            xml.Asset_ {
-              xml.Id_ "urn:uuid:#{ asset_uuid }"
-              # optional: AnnotationText per asset
-              xml.Hash_ asdcp_digest( asset )
-              xml.Size_ File.size( asset )
-              xml.Type_ mimetype
-              xml.OriginalFileName_ File.basename( asset )
-            } # Asset
-          end # assets.each
-        } # AssetList
-      } # PackingList
-    end # @builder
-  end # initialize
-  
-  def xml
-    return @builder.to_xml( :indent => 2 )
-  end
-end # PKL_SMPTE_429_8_2007
-
-
-class AM_SMPTE_429_9_2007
-  def initialize( am_uuid, issue_date, issuer, creator, assets )
-    @builder = Nokogiri::XML::Builder.new( :encoding => 'UTF-8' ) do |xml|
-      xml.AssetMap_( :xmlns => 'http://www.smpte-ra.org/schemas/429-9/2007/AM' ) {
-        xml<< "<!-- #{ AppName } #{ AppVersion } smpte am -->"
-        xml.Id_ "urn:uuid:#{ am_uuid }"
-        xml.Creator_ creator
-        xml.VolumeCount_ '1' # FIXME
-        xml.IssueDate_ issue_date
-        xml.Issuer_ issuer
-        xml.AssetList_ {
-          assets.each do |asset|
-            fh = File.open( asset, 'r' )
-            fh_line = fh.read( 19 )
-            fh.close
-            if fh_line =~ /^<\?xml version="1.0"/
-              doc = Nokogiri::XML::Document.parse( File.read( asset ) )
-              if doc.search( "//xmlns:PackingList" ).empty? # FIXME assume CPL
-                packing_list = FALSE
-                asset_uuid = Nokogiri::XML( File.open( asset ) ).xpath( "//xmlns:CompositionPlaylist/xmlns:Id" ).text.split( 'urn:uuid:' ).last
-              else
-                packing_list = TRUE
-                asset_uuid = Nokogiri::XML( File.open( asset ) ).xpath( "//xmlns:PackingList/xmlns:Id" ).text.split( 'urn:uuid:' ).last
-              end # PackingList?
-            else # MXF
-              metadata = MXF_Metadata.new( asset ).hash
-              asset_uuid = metadata[ 'AssetUUID' ]
-            end
-            
-            xml.Asset_ {
-              xml.Id_ "urn:uuid:#{ asset_uuid }"
-              if packing_list == TRUE
-                xml.PackingList_ 'true'
-              end
-              xml.ChunkList_ {
-                xml.Chunk_ {
-                  xml.Path_ File.basename( asset )
-                  # optional: VolumeIndex
-                  # optional: Offset
-                  # optional: Length
-                } # Chunk
-              } # ChunkList
-            } # Asset
-          end # assets.each
-        } # AssetList
-      } # AssetMap
-    end # @builder
-  end # initialize
-  
-  def xml
-    return @builder.to_xml( :indent => 2 )
-  end
-end # AM_SMPTE_429_9_2007
-
-
-# Prototype. Text-only
-class DCST_SMPTE_428_7_2007
-  def initialize( subtitle_reel_id, content_title_text, annotation_text, issue_date, reel_number, language, edit_rate, time_code_rate, start_time, fonts, default_font_color_code, default_font_name, default_font_size, default_font_weight, subtitles )
-    @builder = Nokogiri::XML::Builder.new( :encoding => 'UTF-8' ) do |xml|
-      xml.SubtitleReel_( 'xmlns:dcst' => "http://www.smpte-ra.org/schemas/428-7/2007/DCST", 'xmlns:xs' => "http://www.w3.org/2001/XMLSchema", 'targetNamespace' => "http://www.smpte-ra.org/schemas/428-7/2007/DCST", 'elementFormDefault' => "qualified", 'attributeFormDefault' => "unqualified" ) {
-        xml<< "<!-- #{ AppName } #{ AppVersion } smpte dcst -->"
-        xml.Id_ "urn:uuid:#{ subtitle_reel_id }"
-        xml.ContentTitleText_ content_title_text
-        xml.AnnotationText_ annotation_text
-        xml.IssueDate_ issue_date
-        xml.ReelNumber_ reel_number
-        xml.Language_ language
-        xml.EditRate_ edit_rate
-        xml.TimeCodeRate_ time_code_rate
-        xml.StartTime_ start_time
-        # fonts = [ [font, id], [font, id], ... ]
-        fonts.each do |font|
-          xml.LoadFont_( "urn:uuid:#{ font[ 1 ] }", 'ID' => font[ 0 ] )
-        end # fonts.each
-        xml.SubtitleList_ {
-          xml.Font_( 'Color' => default_font_color_code, 'ID' => default_font_name, 'Size' => default_font_size, 'Weight' => default_font_weight ) {
-            # subtitles = [ [tc_in, tc_out, fade_up, fade_down, text], [...] ]
-            subtitles.each_with_index do |subtitle, index|
-              xml.Subtitle_( 'SpotNumber' => index + 1, 'TimeIn' => subtitle[ 0 ], 'TimeOut' => subtitle[ 1 ], 'FadeUpTime' => subtitle[ 2 ], 'FadeDownTime' => subtitle[ 3 ] )
-            end # subtitles.each
-          } # Font
-        } # SubtitleList
-      } # SubtitleReel
-    end # @builder
-  end # initialize
-  
-  def xml
-    @builder.to_xml( :indent => 2 )
-  end
-end # DCST_SMPTE_428_7_2007
-
-
-class MXF_Metadata < Hash
-  def initialize( mxf )
-    asdcp_info = `asdcp-test -v -i #{ mxf }`.chomp
-    if asdcp_info =~ /File essence type is JPEG 2000/ # ... (stereoscopic)? pictures
-      asdcp_info = asdcp_info.split( /\n-- JPEG 2000 Metadata --/ ).first
-    end
-    asdcp_info = asdcp_info.split( /\n\s*/ )
-    @meta = Hash.new
-    asdcp_info.each do |line|
-      key, value = line.split( ': ' )
-      @meta[ key ] = value
-    end
-  end # initialize
-  
-  def hash
-    @meta
-  end
-end # MXF_Metadata
-
-
-# FIXME expects an ordered certificate chain (pem format) for now:
-#
-# 1. self-signed root certificate
-# 2. intermediate certificate signed by root certificate
-# 3. ...
-# n. leaf cert signed by previous intermediate 
-#
-# an ordered certificate chain is created by iterating through your certificates,
-# starting with a self-signed root certificate -> verify -> append to (empty) certificate chain
-# verify root-signed intermediate certificate -> append ... repeat until leaf certificate.
-#
-# returns reversed list of OpenSSL::X509::Certificates (leaf, inter, ..., root)
-class X509CertificateChain
-  def initialize( certchain_text )
-    @certs = Array.new
-    c = Array.new
-
-    certchain_text.split( /\n/ ).each do |line|
-      if line =~ /-----BEGIN CERTIFICATE-----/
-        c = Array.new
-        c << line
-      elsif line =~ /-----END CERTIFICATE-----/
-        c << line
-        @certs << OpenSSL::X509::Certificate.new( c.join( "\n" ) + "\n" )
-      else
-        c << line
-      end
-    end
-    
-    @certs.reverse!
-    
-  end # initialize
-  def to_a
-    @certs
-  end
-  def []( index )
-    @certs[ index ]
-  end
-  def size
-    @certs.size
-  end
-end # X509CertificateChain
-
-
-module DCTools
-  def transform_cert_name( name )
-    # OpenSSL::X509::Name.to_a -> to get an array of RDNs:
-    # [["O", "example.com", 19], ["OU", "csc.example.com", 19], ["CN", "CS.dcstore.CONTENT", 19], ["dnQualifier", "/I8bDQt32ucQDc+53O1pZn2jTw8=", 19]]
-    # for '/O=example.com/OU=csc.example.com/CN=CS.dcstore.CONTENT/dnQualifier=/I8bDQt32ucQDc+53O1pZn2jTw8='
-    tmp = Array.new
-    name.to_a.each do |rdn|
-      tmp << [ rdn[ 0 ], rdn[ 1 ] ].join( '=' )
-    end
-    return tmp.reverse.join( ',' )
-  end
-  
-  def asdcp_digest( file )
-    # equiv. `openssl dgst -sha1 -binary #{ file } | openssl base64`.chomp
-    # equiv. `asdcp-test -t #{ file }`.split( ' ' ).first
-    Base64::encode64( OpenSSL::Digest.digest( OpenSSL::Digest::SHA1.new, File.read( file ) ) ).chomp
-  end
-  
-  def cipher_data_payload_binary_package( signer_cert_thumbprint, cpl_id, key_type, key_id, kdm_not_valid_before, kdm_not_valid_after, key )
-    # see SMPTE 430-1-2006 section 6.1.2 Cipher Data
-    structure_id_bin = %w( f1 dc 12 44 60 16 9a 0e 85 bc 30 06 42 f8 66 ab ).pack( 'H2H2H2H2H2H2H2H2H2H2H2H2H2H2H2H2' )
-    signer_cert_thumbprint_bin = `echo '#{ signer_cert_thumbprint }' | openssl base64 -d`
-    cpl_id_bin = uuid_to_bin( cpl_id )
-    key_id_bin = uuid_to_bin( key_id )
-    key_bin = key.split( /(\w\w)/ ).delete_if { |e| e == '' }.pack( 'H2H2H2H2H2H2H2H2H2H2H2H2H2H2H2H2' )
-    binary_package = structure_id_bin + signer_cert_thumbprint_bin + cpl_id_bin + key_type + key_id_bin + kdm_not_valid_before + kdm_not_valid_after + key_bin
-  end
-  
-  def uuid_to_bin( uuid_string )
-    uuid_string.gsub( /[^0-9A-Fa-f]/, '' )[ 0..31 ].to_a.pack 'H*'
-  end
-  
-  def stripped( pem )
-    pem.gsub( /-----(BEGIN|END) CERTIFICATE-----\n/, '' ).chomp
-  end
-end # DCTools
-include DCTools
-
-
-class Logger
-  attr_accessor :prefix
-  def initialize( prefix, verbosity )
-    @verbosity = verbosity
-    @critical = TRUE
-    case @verbosity
-    when "quiet"
-      @info = FALSE
-      @warn = FALSE
-      @debug = FALSE
-    when "info"
-      @info = TRUE
-      @warn = TRUE
-      @debug = FALSE
-    when "debug"
-      @info = TRUE
-      @warn = TRUE
-      @debug = TRUE
-    end
-    @prefix = prefix
-    @color = Hash.new
-    # these work ok on a black background:
-    @color[:info] = ''
-    @color[:debug] = '32'
-    @color[:warn] = '33'
-    @color[:critical] = '1'
-  end
-  def info( text )
-    to_console( @color[:info], text ) if @info == TRUE
-  end
-  def warn( text )
-    to_console( @color[:warn], text ) if @warn == TRUE
-  end
-  def debug( text )
-    to_console( @color[:debug], text ) if @debug == TRUE
-  end
-  def critical( text )
-    to_console( @color[:critical], text ) if @critical == TRUE
-  end
-  def cr( text )
-    carriage_return( @color[:info], text ) unless @verbosity == "quiet"
-  end
-  def carriage_return( color, text )
-    printf "\033[#{ color }m#{ @prefix } #{ text }\033[0m#{ ' ' * 24 }\r"; STDOUT.flush
-  end
-  def to_console( color, text )
-    printf "\033[#{ color }m#{ @prefix } #{ text }\033[0m#{ ' ' * 24 }\n"
-  end
-end
+@options = Options.parse( ARGV )
 @logger = Logger.new( prefix = '*', @options.verbosity )
 
-
-def check_external( requirements )
-  available_tools = Array.new
-  missing_tools = Array.new
-  requirements.each do |tool|
-    exitstatus = system "which #{ tool } > /dev/null 2>&1"
-    case exitstatus
-    when TRUE
-      @logger.debug( "Available: #{ tool }" )
-      available_tools << tool
-    when FALSE
-      @logger.debug( "Missing: #{ tool }" )
-      missing_tools << tool
-    end
-  end
-  return available_tools, missing_tools
-end
-
-
-def hours_minutes_seconds_verbose( seconds )
-  t = seconds
-  hrs = ( ( t / 3600 ) ).to_i
-  min = ( ( t / 60 ) % 60 ).to_i
-  sec = t % 60
-  return [
-    hrs > 0 ? hrs.to_s + " hour#{ 's' * ( hrs > 1 ? 1 : 0 ) }" : nil ,
-    min > 0 ? min.to_s + " minute#{ 's' * ( min > 1 ? 1 : 0 ) }" : nil ,
-    sec == 1 ? sec.to_i.to_s + ' second' : sec != 0 ? sec.to_s + ' seconds' : nil ,
-    t > 60 ? "(#{ t } seconds)" : nil
-  ].compact.join( ' ' )
-end
-
-
-def hms_from_seconds( seconds )
-  hours = ( seconds / 3600.0 ).to_i
-  minutes = ( ( seconds / 60.0 ) % 60 ).to_i
-  secs = seconds % 60
-  return [ hours, minutes, secs ].join( ':' )
-end
-def seconds_from_hms( timestring ) # hh:mm:ss.fraction
-  a = timestring.split( ':' )
-  hours = a[0].to_i
-  minutes = a[1].to_i
-  secs = a[2].to_f
-  return ( hours * 3600 + minutes * 60 + secs )
-end
-
-
-def final_report( sequence_frames, fps, transition_and_timing, keep )
-  sequence_duration = sequence_frames / fps
-  @logger.info( "DCP length ..." )
-  @logger.info( "Pick up DCP at #{ @dcpdir }" ) if @output_type == 'dcp'
-end
-
-
-def cleanup_workdir( keep )
-  @logger.critical "CLEANUP WORKDIR NIL"
-end
-
-
-def get_timestamp
-  #t = Time.now
-  #[t.year, '%02d' % t.month, '%02d' % t.day, '%02d' % t.hour, '%02d' % t.min, '%02d' % t.sec].join('_')
-  DateTime.now.to_s
-end
-timestamp = get_timestamp
-
-
-def jpeg2000_dcp_rate_constraints( fps ) # returns bytes
-  dcp_max_bps = 250000000
-  max_per_image = ( dcp_max_bps / 8 / fps ).floor
-  max_per_component = ( max_per_image / 1.25 ).floor
-  return max_per_image, max_per_component
-end
-
-
-def sequence?( list )
-  nil
-end
-
-
-def confirm_or_create( location )
-# location (a directory) might exist and be either writeable or not.
-# it might not exist and be either writeable (read 'can be created') or not.
-# since we want to be able to specify a "deep" path (topdir/with/children/...) File.writable?() wouldn't work.
-  testfile = File.join( location, `kmuuidgen -n` )
-  if File.exists?( location )
-    begin
-      result = `touch #{ testfile } > /dev/null 2>&1`
-      File.delete( testfile )
-      return TRUE # location exists and we can write to it
-    rescue Exception => result
-      return FALSE # location exists but we can't write to it
-    end
-  else
-    begin
-      result = FileUtils.mkdir_p( location )
-      return TRUE # location created, hence writeable
-    rescue Exception => result
-      return FALSE
-    end
-  end
-end
-
-
-# FIXME right now this is tightly coupled with make-dc-certificate-chain.rb's output.
-# FIXME hardcoded number and names of signer key, certificates and verified chain.
-# FIXME also there's an unholy mix of certificate files here and certificate objects there.
-def signature_context
-  signer_key_file = File.join( CINEMACERTSTORE, 'leaf.key' )
-  ca_cert_file = File.join( CINEMACERTSTORE, 'ca.self-signed.pem' )
-  intermediate_cert_file = File.join( CINEMACERTSTORE, 'intermediate.signed.pem' )
-  signer_cert_file = File.join( CINEMACERTSTORE, 'leaf.signed.pem' )
-  certchain_text = File.read( File.join( CINEMACERTSTORE, 'dc-certificate-chain' ) ) # verified chain [ root, intermediate, leaf ]
-  certchain_objs = X509CertificateChain.new( certchain_text ).to_a
-  signer_cert_obj = certchain_objs.first
-  return signer_key_file, signer_cert_file, signer_cert_obj, ca_cert_file, intermediate_cert_file, certchain_text, certchain_objs
-end
-
-
-def key_types
-  { 'MainPicture' => 'MDIK', 'MainStereoscopicPicture' => 'MDIK', 'MainSound' => 'MDAK', 'MainSubtitle' => 'MDSK' }
-end
-
-
-def key_id_type_for( assetname, node )
-  key_id = node.xpath( "AssetList/#{ assetname }/KeyId" ).text.split( ':' ).last
-  unless key_id.nil?
-    type = key_types[ assetname ]
-    key_type_id = Hash.new
-    key_type_id[ key_id ] = type
-    @logger.debug( "   #{ type } => #{ key_id }" )
-    return key_type_id
-  end
-end
-
-
-def kdm_cpl_info( doc )
-  # removing namespaces feels broken right there.
-  # makes the KeyId searches in reels set below work, though,
-  # whereas searches with ns prefixes wouldn't
-  # FIXME reference counter for keys
-  doc.remove_namespaces!
-  cpl_uuid = doc.xpath( '//CompositionPlaylist/Id' ).text.split( ':' ).last
-  content_title_text = doc.xpath( '//CompositionPlaylist/ContentTitleText' ).text
-  @logger.info( "Content title: #{ content_title_text }" )
-  @logger.debug( "CPL UUID: #{ cpl_uuid }" )
-  
-  reels = doc.xpath( '//CompositionPlaylist/ReelList/Reel' )
-  @logger.debug( "CPL has #{ reels.size } reel#{ ( reels.size > 1 or reels.size == 0 ) ? 's' : '' }" )
-  
-  key_ids_types = Array.new
-  reels.each_with_index do |reel, index|
-    reel_id = reel.xpath( "Id" ).text.split( ':' ).last
-    @logger.debug( "Reel # #{ index + 1 } (#{ reel_id })" )
-    [ 'MainPicture', 'MainStereoscopicPicture', 'MainSound', 'MainSubtitle' ].each do |assetname|
-      key = key_id_type_for( assetname, reel )
-      next if key.nil?
-      if key_ids_types.include?( key )
-        @logger.debug( '   <Key seen>' )
-      else
-        key_ids_types << key
-      end
-    end
-  end
-  return cpl_uuid, content_title_text, key_ids_types
-end
-
-
-# needs to be fixed in due time (signature context cleanup)
-# right now this assumes that the first certificate is the signer's certificate
-# specs allow for any order
-def signer_cert_thumbprint( doc )
-  doc.remove_namespaces!
-  certs = doc.xpath( '//CompositionPlaylist/Signature/KeyInfo/X509Data/X509Certificate' )
-  @logger.debug( "CPL carries #{ certs.size } certificates" )
-  signer_cert = "-----BEGIN CERTIFICATE-----\n" + certs.first.text + "\n-----END CERTIFICATE-----\n"
-  tmp = Tempfile.new( 'cinemaslides-' )
-  tmpfile = File.open( tmp.path, 'w' ) { |f| f.write signer_cert; f.close }
-  thumbprint = dc_thumbprint( tmp.path )
-  @logger.debug( "CPL signer certificate thumbprint: #{ thumbprint }" )
-  return thumbprint
-end
-
-
-def key_spec_valid?( candidate )
-  if /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(MDIK|MDAK|MDSK):[0-9a-f]{32}/.match( candidate ) == NIL
-    FALSE
-  else
-    TRUE
-  end
-end
-
-
-# date helpers
-def time_to_datetime( time ) # OpenSSL's ruby bindings return Time objects for certificate validity info
-  DateTime.parse( time.to_s )
-end
-def datetime_friendly( dt ) # return something in the form of "Tuesday Nov 30 2010 (18:56)"
-  "#{ DateTime::DAYNAMES[ dt.wday ] } #{ DateTime::ABBR_MONTHNAMES[ dt.month ] } #{ dt.day.to_s } #{ dt.year.to_s } (#{ '%02d' % dt.hour.to_s }:#{ '%02d' % dt.min.to_s })"
-end
-def yyyymmdd( datetime ) # used in KDM filenames. See http://www.kdmnamingconvention.com/
-  datetime.to_s.split('T').first.gsub( /-/,'' )
-end
-
-
-def dc_thumbprint( cert_file )
-  tmp = Tempfile.new( 'cinemaslides-' )
-  `openssl asn1parse -in #{ cert_file } -out #{ tmp.path } -noout -strparse 4`
-  `openssl dgst -sha1 -binary #{ tmp.path } | openssl base64`.chomp
-end
-###
-
-
-
-def dcp_summary
-  @logger.info( "Creating#{ @options.sign == TRUE ? ' signed' : '' }#{ @options.dcp_encrypt == TRUE ? ' and encrypted' : '' }#{ @dcp_wrap_stereoscopic == TRUE ? ' 3D' : ' 2D' } #{ @size.upcase } DCP (#{ @aspect } #{ @dimensions } @ #{ fps } fps). Encoder: #{ @options.encoder }" )
-  @logger.info( "Number of images: #{ @source.size }" )
-  @logger.info( "Transition specs: #{ @options.transition_and_timing.join( ',' ) }" )
-  @logger.info( "Projected length: #{ hours_minutes_seconds_verbose( sequence_frames / fps ) }" )
-  @logger.info( "Title:            #{ @options.dcp_title }" )
-  @logger.info( "Annotation:       #{ @options.annotation }" )
-  @logger.info( "Issuer:           #{ @options.issuer }" )
-  @logger.info( "Kind:             #{ @options.dcp_kind }" )
-  if @options.sign == TRUE
-    @logger.info( "Signer:           #{ signer_cert_obj.subject.to_s }" )
-  end
-end
 
 def reel_list( files )
   reels = Array.new
@@ -1087,6 +168,27 @@ def make_kdm
   # failure of any of the following checks is reason to exit
   kdm_no_go = Array.new
   kdm_issue_date = DateTime.now
+  
+  # set up signature context
+  # FIXME check availability and validity of certificates/keys
+  # FIXME include verification of certchain and matrjoschka-contained validity periods
+  if ENV[ 'CINEMACERTSTORE' ].nil?
+    @logger.info( "Expecting certificates at $CINEMACERTSTORE. Set this environment variable with 'export CINEMACERTSTORE=<path>'" )
+    @logger.info( "Run make-dc-certificate-chain.rb in that directory to create the required certificates." )
+    @logger.info( "Sorry for the inconvenience. Work in progress" )
+    kdm_no_go << 'CINEMACERTSTORE not set'
+  else
+    cinemacertstore = ENV[ 'CINEMACERTSTORE' ]
+    @logger.debug( "CINEMACERTSTORE is set to #{ cinemacertstore }" )
+    if File.exists?( cinemacertstore ) and File.ftype( cinemacertstore ) == 'directory'
+      signer_key_file, signer_cert_file, signer_cert_obj, ca_cert_file, intermediate_cert_file, certchain_text, certchain_objs = signature_context
+      signer_cert_thumbprint = dc_thumbprint( signer_cert_file )
+      @logger.info( "KDM signer: #{ signer_cert_obj.subject.to_s }" )
+    else
+      @logger.info( "CINEMACERTSTORE should point at a directory holding your private signer key and associated certificates" )
+      kdm_no_go << 'CINEMACERTSTORE not a directory'
+    end
+  end
   
   # check for key directory
   @keysdir = File.join( @dietrichdir, 'keys' )
@@ -1286,7 +388,7 @@ def make_kdm
   # Sign and write kdm to disk
   @logger.debug( 'Sign and write KDM to disk' )
 
-  kdm_signed_xml = DCSignatureKDM.new( 
+  kdm_signed_xml = DC_Signature_KDM.new( 
     kdm_xml,
     signer_key_file,
     ca_cert_file,
@@ -1332,41 +434,43 @@ else
 end
 
 
+################################# modes switch
 case @options.mode
 when 'cpl'
   reels = reel_list( ARGV )
   make_cpl( reels )
   exit
 when 'pkl'
-  pkl_assets = make_pkl
+  pkl_assets = make_pkl # ?
   make_map( pkl_assets )
   exit
 when 'kdm'
   make_kdm
   exit
-end
-
-
-  # set up signature context
-  # FIXME check availability and validity of certificates/keys
-  # FIXME include verification of certchain and matrjoschka-contained validity periods
-  if ENV[ 'CINEMACERTSTORE' ].nil?
-    @logger.info( "Expecting certificates at $CINEMACERTSTORE. Set this environment variable with 'export CINEMACERTSTORE=<path>'" )
-    @logger.info( "Run make-dc-certificate-chain.rb in that directory to create the required certificates." )
-    @logger.info( "Sorry for the inconvenience. Work in progress" )
-    kdm_no_go << 'CINEMACERTSTORE not set'
+when 'signature-context'
+  require 'DC_Signature_Context'
+  files = get_argv_files
+  context = DC_Signature_Context.new( files )
+  if context.valid?
+    puts context.messages
+    puts "OK"
   else
-    CINEMACERTSTORE = ENV[ 'CINEMACERTSTORE' ]
-    @logger.debug( "CINEMACERTSTORE is set to #{ CINEMACERTSTORE }" )
-    if File.exists?( CINEMACERTSTORE ) and File.ftype( CINEMACERTSTORE ) == 'directory'
-      signer_key_file, signer_cert_file, signer_cert_obj, ca_cert_file, intermediate_cert_file, certchain_text, certchain_objs = signature_context
-      signer_cert_thumbprint = dc_thumbprint( signer_cert_file )
-      @logger.info( "KDM signer: #{ signer_cert_obj.subject.to_s }" )
+    if ! context.errors[ :pre_context ].empty?
+      puts context.errors[ :pre_context ]
+      puts "No valid signature context found"
+      exit
     else
-      @logger.info( "CINEMACERTSTORE should point at a directory holding your private signer key and associated certificates" )
-      kdm_no_go << 'CINEMACERTSTORE not a directory'
+      puts context.messages
+      puts "No valid signature context found"
+      exit
     end
   end
+
+end
+################################# end modes switch
+
+
+  
   
 
 # check required tools -- well, it's still messy
